@@ -2,7 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SpreadsheetFile, Workbook } from "@oai/artifact-tool";
-import { parseCsv } from "./lib/csv.mjs";
+import { parseCsv, stringifyCsv } from "./lib/csv.mjs";
+import { loadLatestInterviewers } from "./lib/interviewer-workbook.mjs";
+import {
+  INTERVIEWER_HEADERS,
+  normalizeInterviewerRow,
+  validateInterviewers,
+} from "./lib/interviewers.mjs";
 import { normalizeApplicantRow, normalizeSlotRow, validateSchedule } from "./lib/scheduler.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,7 +33,7 @@ function displayDate(dateText) {
   return `${Number(month)}月${Number(day)}日`;
 }
 
-export function buildScheduleWorkbook({ applicants, slots, config }) {
+export function buildScheduleWorkbook({ applicants, interviewers = [], slots, config }) {
   const workbook = Workbook.create();
   const sheet = workbook.worksheets.add("面试排班");
   const fontFamily = "Microsoft YaHei";
@@ -77,6 +83,9 @@ export function buildScheduleWorkbook({ applicants, slots, config }) {
   for (const members of applicantsBySlot.values()) {
     members.sort((left, right) => Number(left.seat_no) - Number(right.seat_no));
   }
+  const interviewersBySlotAndDepartment = new Map(
+    interviewers.map((item) => [`${item.slot_id}\u0000${item.department}`, item.interviewers]),
+  );
 
   const dates = [...new Set(slots.map((slot) => slot.date))];
   let row = 4;
@@ -154,6 +163,11 @@ export function buildScheduleWorkbook({ applicants, slots, config }) {
       verticalAlignment: "center",
       borders: borderAll,
     };
+    sheet.getRange(`C${firstDataRow}:H${lastDataRow}`).values = dateSlots.map((slot) =>
+      config.departments.map(
+        (department) => interviewersBySlotAndDepartment.get(`${slot.slot_id}\u0000${department}`) ?? "",
+      ),
+    );
     sheet.getRange(`J${firstDataRow}:N${lastDataRow}`).format = {
       fill: colors.blue,
       font: { name: fontFamily, size: 10, color: colors.text },
@@ -188,8 +202,8 @@ export function buildScheduleWorkbook({ applicants, slots, config }) {
   return { workbook, sheet, lastRow: row - 1 };
 }
 
-export async function writeScheduleWorkbook({ applicants, slots, config, outputPath, previewPath }) {
-  const { workbook, lastRow } = buildScheduleWorkbook({ applicants, slots, config });
+export async function writeScheduleWorkbook({ applicants, interviewers = [], slots, config, outputPath, previewPath }) {
+  const { workbook, lastRow } = buildScheduleWorkbook({ applicants, interviewers, slots, config });
   workbook.recalculate();
   await workbook.inspect({
     kind: "table",
@@ -225,18 +239,57 @@ async function runCli() {
   const args = parseArgs(process.argv.slice(2));
   const applicantsPath = path.resolve(args.applicants ?? path.join(projectRoot, "data", "applicants.csv"));
   const slotsPath = path.resolve(args.slots ?? path.join(projectRoot, "data", "slots.csv"));
+  const interviewersPath = path.resolve(args.interviewers ?? path.join(projectRoot, "data", "interviewers.csv"));
   const configPath = path.resolve(args.config ?? path.join(projectRoot, "config", "schedule.json"));
-  const outputPath = path.resolve(args.output ?? path.join(projectRoot, "outputs", "2026_interview_schedule.xlsx"));
+  const canonicalOutputPath = path.resolve(path.join(projectRoot, "outputs", "2026_interview_schedule.xlsx"));
+  const outputPath = path.resolve(args.output ?? canonicalOutputPath);
   const previewPath = path.resolve(args.preview ?? path.join(projectRoot, "outputs", "2026_interview_schedule_preview.png"));
+  const interviewerSourcePath = path.resolve(args["interviewer-source"] ?? canonicalOutputPath);
+  const temporaryXlsx = `${outputPath}.tmp-${process.pid}.xlsx`;
+  const temporaryPreview = `${previewPath}.tmp-${process.pid}.png`;
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   const applicantCsv = parseCsv(await fs.readFile(applicantsPath, "utf8"));
   const slotCsv = parseCsv(await fs.readFile(slotsPath, "utf8"));
   const applicants = applicantCsv.rows.map(normalizeApplicantRow);
   const slots = slotCsv.rows.map(normalizeSlotRow).sort((left, right) => left.display_order - right.display_order);
+  const interviewerState = await loadLatestInterviewers({
+    interviewersPath,
+    sourcePath: interviewerSourcePath,
+    slots,
+    config,
+  });
+  const interviewers = interviewerState.interviewers.map(normalizeInterviewerRow);
   const validation = validateSchedule(applicants, slots, config);
-  if (validation.errors.length) throw new Error(validation.errors.join("\n"));
-  const result = await writeScheduleWorkbook({ applicants, slots, config, outputPath, previewPath });
-  console.log(JSON.stringify({ outputPath, previewPath, lastRow: result.lastRow }));
+  const interviewerValidation = validateInterviewers(interviewers, slots, config);
+  const errors = [...validation.errors, ...interviewerValidation.errors];
+  if (errors.length) throw new Error(errors.join("\n"));
+  const result = await writeScheduleWorkbook({
+    applicants,
+    interviewers,
+    slots,
+    config,
+    outputPath: temporaryXlsx,
+    previewPath: temporaryPreview,
+  });
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await fs.copyFile(temporaryXlsx, outputPath);
+  await fs.unlink(temporaryXlsx);
+  await fs.rm(`${temporaryXlsx}.inspect.ndjson`, { force: true });
+  await fs.mkdir(path.dirname(previewPath), { recursive: true });
+  await fs.copyFile(temporaryPreview, previewPath);
+  await fs.unlink(temporaryPreview);
+  const temporaryCsv = `${interviewersPath}.tmp-${process.pid}`;
+  await fs.writeFile(temporaryCsv, stringifyCsv(INTERVIEWER_HEADERS, interviewers), "utf8");
+  await fs.copyFile(temporaryCsv, interviewersPath);
+  await fs.unlink(temporaryCsv);
+  console.log(
+    JSON.stringify({
+      outputPath,
+      previewPath,
+      lastRow: result.lastRow,
+      interviewers: interviewerState.summary,
+    }),
+  );
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

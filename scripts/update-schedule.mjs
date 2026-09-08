@@ -3,6 +3,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCsv, stringifyCsv } from "./lib/csv.mjs";
+import { loadLatestInterviewers } from "./lib/interviewer-workbook.mjs";
+import {
+  INTERVIEWER_HEADERS,
+  normalizeInterviewerRow,
+  validateInterviewers,
+} from "./lib/interviewers.mjs";
 import {
   APPLICANT_HEADERS,
   normalizeApplicantRow,
@@ -31,7 +37,7 @@ function renderPeople(items) {
   return items.map((item) => `${item.name}（${item.student_id}）`).join("、");
 }
 
-function buildReport({ inputPath, sourceHash, importSummary, scheduleSummary, validation }) {
+function buildReport({ inputPath, sourceHash, importSummary, interviewerSummary, scheduleSummary, validation }) {
   const lines = [
     "# 本次报名表处理结果",
     "",
@@ -45,6 +51,12 @@ function buildReport({ inputPath, sourceHash, importSummary, scheduleSummary, va
     `- 已排班：${scheduleSummary.scheduled}`,
     `- 未排班：${scheduleSummary.unassigned}`,
     `- 仅选择线上面试：${scheduleSummary.onlineOnly}`,
+    "",
+    "## 面试官信息",
+    "",
+    `- 最新来源：${interviewerSummary.source === "xlsx" ? path.basename(interviewerSummary.sourcePath) : "data/interviewers.csv（本地排班表不存在）"}`,
+    `- 非空安排：${interviewerSummary.entries}`,
+    `- 本次变化：新增 ${interviewerSummary.added}，修改 ${interviewerSummary.updated}，清除 ${interviewerSummary.removed}`,
     "",
     "## 人员变化",
     "",
@@ -101,10 +113,13 @@ async function main() {
   const inputPath = path.resolve(args.input);
   const applicantsPath = path.resolve(args.applicants ?? path.join(projectRoot, "data", "applicants.csv"));
   const slotsPath = path.resolve(args.slots ?? path.join(projectRoot, "data", "slots.csv"));
+  const interviewersPath = path.resolve(args.interviewers ?? path.join(projectRoot, "data", "interviewers.csv"));
   const configPath = path.resolve(args.config ?? path.join(projectRoot, "config", "schedule.json"));
-  const outputPath = path.resolve(args.output ?? path.join(projectRoot, "outputs", "2026_interview_schedule.xlsx"));
+  const canonicalOutputPath = path.resolve(path.join(projectRoot, "outputs", "2026_interview_schedule.xlsx"));
+  const outputPath = path.resolve(args.output ?? canonicalOutputPath);
   const previewPath = path.resolve(args.preview ?? path.join(projectRoot, "outputs", "2026_interview_schedule_preview.png"));
   const reportPath = path.resolve(args.report ?? path.join(projectRoot, "reports", "latest-conflicts.md"));
+  const interviewerSourcePath = path.resolve(args["interviewer-source"] ?? canonicalOutputPath);
   const temporaryXlsx = `${outputPath}.tmp-${process.pid}.xlsx`;
   const temporaryPreview = `${previewPath}.tmp-${process.pid}.png`;
 
@@ -113,6 +128,13 @@ async function main() {
   const slotCsv = parseCsv(await fs.readFile(slotsPath, "utf8"));
   const existingApplicants = existingCsv.rows.map(normalizeApplicantRow);
   const slots = slotCsv.rows.map(normalizeSlotRow).sort((left, right) => left.display_order - right.display_order);
+  const interviewerState = await loadLatestInterviewers({
+    interviewersPath,
+    sourcePath: interviewerSourcePath,
+    slots,
+    config,
+  });
+  const interviewers = interviewerState.interviewers.map(normalizeInterviewerRow);
   const imported = await importWorkbookSnapshot({
     inputPath,
     slots,
@@ -122,11 +144,14 @@ async function main() {
   const scheduled = scheduleApplicants(imported.applicants, slots, config);
   const normalizedScheduled = scheduled.applicants.map(normalizeApplicantRow);
   const validation = validateSchedule(normalizedScheduled, slots, config);
+  const interviewerValidation = validateInterviewers(interviewers, slots, config);
+  validation.errors.push(...interviewerValidation.errors);
   if (validation.errors.length) throw new Error(validation.errors.join("\n"));
 
   await fs.mkdir(path.dirname(temporaryXlsx), { recursive: true });
   await writeScheduleWorkbook({
     applicants: normalizedScheduled,
+    interviewers,
     slots,
     config,
     outputPath: temporaryXlsx,
@@ -138,12 +163,15 @@ async function main() {
     inputPath,
     sourceHash,
     importSummary: imported.summary,
+    interviewerSummary: interviewerState.summary,
     scheduleSummary: scheduled.summary,
     validation,
   });
   const csv = stringifyCsv(APPLICANT_HEADERS, scheduled.applicants);
+  const interviewerCsv = stringifyCsv(INTERVIEWER_HEADERS, interviewers);
 
   await writeFileAtomically(applicantsPath, csv);
+  await writeFileAtomically(interviewersPath, interviewerCsv);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.copyFile(temporaryXlsx, outputPath);
   await fs.unlink(temporaryXlsx);
@@ -164,6 +192,7 @@ async function main() {
       scheduled: scheduled.summary.scheduled,
       unassigned: scheduled.summary.unassigned,
       onlineOnly: scheduled.summary.onlineOnly,
+      interviewers: interviewerState.summary,
       smallGroups: scheduled.summary.smallGroups,
       sixPersonGroups: scheduled.summary.sixPersonGroups,
       outputPath,
