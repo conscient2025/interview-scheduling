@@ -1,0 +1,11 @@
+node_modules/
+.artifact-build/
+.skill-build/
+incoming/
+outputs/
+reports/
+*.xlsx
+*.xls
+*.tmp
+*.log
+
