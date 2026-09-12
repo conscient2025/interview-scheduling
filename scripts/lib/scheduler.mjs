@@ -302,8 +302,25 @@ export function scheduleApplicants(inputApplicants, slots, config) {
   }
 
   while (unassigned.length > 0) {
-    const closedCandidates = slots
-      .filter((slot) => !activeSlotIds.has(slot.slot_id))
+    // Anchor each new group with the applicant who has the fewest unopened
+    // alternatives, then use more flexible applicants to complete the batch.
+    const anchorCandidate = unassigned
+      .map((applicant) => ({
+        applicant,
+        closedSlotIds: applicant.available_slots.filter(
+          (slotId) => slotById.has(slotId) && !activeSlotIds.has(slotId),
+        ),
+      }))
+      .filter((candidate) => candidate.closedSlotIds.length > 0)
+      .sort((left, right) => {
+        const flexibilityDelta = left.closedSlotIds.length - right.closedSlotIds.length;
+        if (flexibilityDelta !== 0) return flexibilityDelta;
+        return compareStrings(left.applicant.student_id, right.applicant.student_id);
+      })[0];
+
+    if (!anchorCandidate) break;
+    const closedCandidates = anchorCandidate.closedSlotIds
+      .map((slotId) => slotById.get(slotId))
       .map((slot) => {
         const eligible = unassigned.filter((applicant) => applicant.available_slots.includes(slot.slot_id));
         const batchSize = chooseBatchSize(eligible.length, config);
@@ -324,13 +341,17 @@ export function scheduleApplicants(inputApplicants, slots, config) {
     if (closedCandidates.length === 0) break;
     const selected = closedCandidates[0];
     activeSlotIds.add(selected.slot.slot_id);
-    const batch = [...selected.eligible]
-      .sort((left, right) => {
-        const flexibilityDelta =
-          applicantFlexibility(left, activeSlotIds, slotById) - applicantFlexibility(right, activeSlotIds, slotById);
-        return flexibilityDelta || compareStrings(left.student_id, right.student_id);
-      })
-      .slice(0, selected.batchSize);
+    const batch = [
+      anchorCandidate.applicant,
+      ...selected.eligible
+        .filter((applicant) => applicant !== anchorCandidate.applicant)
+        .sort((left, right) => {
+          const flexibilityDelta =
+            applicantFlexibility(left, activeSlotIds, slotById) -
+            applicantFlexibility(right, activeSlotIds, slotById);
+          return flexibilityDelta || compareStrings(left.student_id, right.student_id);
+        }),
+    ].slice(0, selected.batchSize);
     for (const applicant of batch) {
       assignToGroup(applicant, selected.slot.slot_id, groups);
       unassigned = unassigned.filter((item) => item !== applicant);
@@ -470,4 +491,3 @@ export function validateSchedule(applicants, slots, config) {
   }
   return { errors, warnings, groupCounts };
 }
-

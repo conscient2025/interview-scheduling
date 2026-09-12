@@ -1,4 +1,5 @@
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
+import { parseAvailability } from "./availability.mjs";
 
 function normalizedHeader(value) {
   return String(value ?? "").replace(/\s+/g, "").trim();
@@ -23,51 +24,6 @@ function parseSubmissionTime(value) {
     Number(match[5]),
     Number(match[6] ?? 0),
   );
-}
-
-function availabilityLookup(slots) {
-  const lookup = new Map();
-  for (const slot of slots) {
-    const [, month, day] = slot.date.match(/^\d{4}-(\d{2})-(\d{2})$/) ?? [];
-    if (!month) continue;
-    lookup.set(`${Number(month)}-${Number(day)}-${slot.start}-${slot.end}`, slot.slot_id);
-  }
-  return lookup;
-}
-
-function parseAvailability(value, slots, config) {
-  const lookup = availabilityLookup(slots);
-  const exactSlots = [];
-  const unknownOptions = [];
-  let onlineOnlySelected = false;
-  const options = String(value ?? "")
-    .split(/[┋\r\n；;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  for (const option of options) {
-    if (config.specialAvailabilityOptions?.[option] === "online_only") {
-      onlineOnlySelected = true;
-      continue;
-    }
-    const match = option.match(/^(\d{1,2})月(\d{1,2})日?\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/);
-    if (!match) {
-      unknownOptions.push(option);
-      continue;
-    }
-    const slotId = lookup.get(`${Number(match[1])}-${Number(match[2])}-${match[3]}-${match[4]}`);
-    if (!slotId) {
-      unknownOptions.push(option);
-      continue;
-    }
-    exactSlots.push(slotId);
-  }
-
-  return {
-    exactSlots: [...new Set(exactSlots)],
-    onlineOnlySelected,
-    unknownOptions,
-  };
 }
 
 function sameArray(left, right) {
@@ -114,7 +70,7 @@ export async function importWorkbookSnapshot({ inputPath, slots, config, existin
       sequence: String(row[indexes.sequence] ?? "").trim(),
       submittedAt: parseSubmissionTime(row[indexes.submittedAt]),
       rowIndex,
-      availability: parsedAvailability.exactSlots,
+      availability: parsedAvailability.availableSlots,
       onlineOnlySelected: parsedAvailability.onlineOnlySelected,
     });
   }
@@ -199,4 +155,3 @@ export async function importWorkbookSnapshot({ inputPath, slots, config, existin
     },
   };
 }
-

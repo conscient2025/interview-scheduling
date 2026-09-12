@@ -86,3 +86,34 @@ test("valid existing assignment and seat are retained", () => {
   assert.equal(result.applicants[0].assigned_slot, "later");
   assert.equal(result.applicants[0].seat_no, "3");
 });
+
+test("a constrained applicant anchors a group before flexible applicants open another slot", () => {
+  const input = applicants(5, ["early", "next"]);
+  input.push({
+    student_id: "32999999",
+    name: "受限学生",
+    available_slots: ["next"],
+    assigned_slot: "",
+    seat_no: "",
+    status: "unassigned",
+  });
+  const result = scheduleApplicants(input, slots, config);
+  assert.deepEqual(new Set(result.applicants.map((item) => item.assigned_slot)), new Set(["next"]));
+  assert.deepEqual(groupSizes(result), [6]);
+  assert.equal(result.summary.smallGroups.length, 0);
+});
+
+test("two-slot applicants are handled before applicants with three alternatives", () => {
+  const input = applicants(5, ["early", "next", "later"]);
+  input.push({
+    student_id: "32999998",
+    name: "较受限学生",
+    available_slots: ["next", "later"],
+    assigned_slot: "",
+    seat_no: "",
+    status: "unassigned",
+  });
+  const result = scheduleApplicants(input, slots, config);
+  assert.deepEqual(groupSizes(result), [6]);
+  assert.equal(result.summary.smallGroups.length, 0);
+});

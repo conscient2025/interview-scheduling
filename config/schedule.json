@@ -10,8 +10,12 @@
   "preserveExistingAssignments": true,
   "preferNonMorning": true,
   "preferEarlierDate": true,
+  "availabilityPeriodLabels": {
+    "上午": "morning",
+    "下午": "afternoon",
+    "晚上": "evening"
+  },
   "specialAvailabilityOptions": {
     "国庆假期线上面试": "online_only"
   }
 }
-
